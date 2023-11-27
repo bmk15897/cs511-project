@@ -4,60 +4,6 @@ import matplotlib.pyplot as plt
 from kafka import KafkaProducer, KafkaConsumer, KafkaAdminClient
 import numpy as np
 
-def produce_messages(broker, topic, num_messages, producer_id, metrics):
-    producer = KafkaProducer(bootstrap_servers=[broker])
-    start_time = time.time()
-
-    for i in range(num_messages):
-        message = f"{producer_id},{i},{time.time()}"
-        producer.send(topic, message.encode('utf-8'))
-    producer.flush()
-
-    end_time = time.time()
-    metrics['producers'][producer_id] = end_time - start_time
-    producer.close()
-
-
-def consume_messages(broker, topic, consumer_id, num_messages, metrics):
-    consumer = KafkaConsumer(topic, bootstrap_servers=[broker], auto_offset_reset='earliest')
-    messages_consumed = 0
-    total_latency = 0
-    start_time = time.time()
-    for message in consumer:
-        messages_consumed += 1
-        #_, _, sent_timestamp = message.value.decode('utf-8').split(',')
-        if messages_consumed >= num_messages:
-            break
-    total_latency += (time.time() - start_time)
-    metrics['consumers'][consumer_id] = {
-        'total_latency': total_latency,
-        'average_latency': total_latency / messages_consumed if messages_consumed > 0 else 0,
-        'messages_consumed': messages_consumed
-    }
-    consumer.close()
-
-
-def run_scalability_test(broker, topic, num_producers, num_consumers, num_messages):
-    threads = []
-    metrics = {'producers': {}, 'consumers': {}}
-
-    # Start producer threads
-    for i in range(num_producers):
-        producer_thread = threading.Thread(target=produce_messages, args=(broker, topic, num_messages, i, metrics))
-        threads.append(producer_thread)
-        producer_thread.start()
-
-    # Start consumer threads
-    for i in range(num_consumers):
-        consumer_thread = threading.Thread(target=consume_messages, args=(broker, topic, i, num_messages, metrics))
-        threads.append(consumer_thread)
-        consumer_thread.start()
-
-    # Wait for all threads to complete
-    for thread in threads:
-        thread.join()
-
-    return metrics
 
 
 # Example usage
@@ -79,79 +25,124 @@ red_panda_admin_client = KafkaAdminClient(
 )
 
 
-def collect_metrics_for_comparison(broker, num_producers_consumers_range, num_messages_range):
-    metrics = {
-        'producer_latency': [],
-        'average_consumer_latency': [],
-        'total_consumer_latency': [],
-        'labels': []  # Store labels for configurations
+import threading
+import time
+import matplotlib.pyplot as plt
+from kafka import KafkaProducer, KafkaConsumer, KafkaAdminClient
+import numpy as np
+
+# Constants
+MESSAGE_SIZE = 1024  # 1 KB per message
+TARGET_THROUGHPUT = 50 * 1024 * 1024  # 50 Mbps in bits
+DURATION = 60  # Duration of the test in seconds
+
+
+def produce_messages(broker, topic, producer_id, metrics):
+    producer = KafkaProducer(bootstrap_servers=[broker])
+    message = 'x' * MESSAGE_SIZE
+    end_time = start_time = time.time()
+    message_count = 0
+
+    while end_time - start_time < DURATION:
+        send_time = time.time()
+        producer.send(topic, f"{producer_id},{message_count},{send_time}".encode('utf-8'))
+        message_count += 1
+        # Adjust the sleep time to regulate the throughput
+        time.sleep(max(0, (message_count / (TARGET_THROUGHPUT / 8 / MESSAGE_SIZE)) - (time.time() - start_time)))
+        end_time = time.time()
+
+    producer.flush()
+    metrics['producers'][producer_id] = end_time - start_time
+    producer.close()
+
+
+def consume_messages(broker, topic, consumer_id, metrics):
+    consumer = KafkaConsumer(topic, bootstrap_servers=[broker], auto_offset_reset='earliest')
+    latencies = []
+    start_time = time.time()
+
+    while time.time() - start_time < DURATION:
+        message = next(consumer)
+        receive_time = time.time()
+        _, _, sent_timestamp = message.value.decode('utf-8').split(',')
+        latency = receive_time - float(sent_timestamp)
+        latencies.append(latency)
+
+    metrics['consumers'][consumer_id] = {
+        'average_latency': np.mean(latencies),
+        '95th_percentile_latency': np.percentile(latencies, 95),
+        '99th_percentile_latency': np.percentile(latencies, 99)
     }
+    consumer.close()
 
-    for num_producers_consumers in num_producers_consumers_range:
-        for num_messages in num_messages_range:
-            test_metrics = run_scalability_test(broker, topic, num_producers_consumers, num_producers_consumers,
-                                                num_messages)
 
-            # Calculate average producer latency
-            total_producer_time = sum(test_metrics['producers'].values())
-            avg_producer_latency = total_producer_time / len(test_metrics['producers'])
-            metrics['producer_latency'].append(avg_producer_latency)
+def run_scalability_test(broker, topic, num_producers, num_consumers):
+    threads = []
+    metrics = {'producers': {}, 'consumers': {}}
 
-            # Calculate consumer latencies
-            total_consumer_latency = sum([x['total_latency'] for x in test_metrics['consumers'].values()])
-            avg_consumer_latency = total_consumer_latency / len(test_metrics['consumers'])
-            metrics['average_consumer_latency'].append(avg_consumer_latency)
-            metrics['total_consumer_latency'].append(total_consumer_latency)
+    # Start producer threads
+    for i in range(num_producers):
+        producer_thread = threading.Thread(target=produce_messages, args=(broker, topic, i, metrics))
+        threads.append(producer_thread)
+        producer_thread.start()
 
-            # Generate label for this configuration
-            label = f"{num_producers_consumers} P/C, {num_messages} Msgs"
-            metrics['labels'].append(label)
+    # Start consumer threads
+    for i in range(num_consumers):
+        consumer_thread = threading.Thread(target=consume_messages, args=(broker, topic, i, metrics))
+        threads.append(consumer_thread)
+        consumer_thread.start()
+
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()
 
     return metrics
 
 
-def plot_comparison(metrics, metric_name, title):
-    x = range(len(metrics['labels']))
-    plt.plot(x, metrics['kafka'], label='Kafka')
-    plt.plot(x, metrics['red_panda'], label='Red Panda')
-    plt.xlabel('Configuration (Producers/Consumers, Messages)')
-    plt.ylabel(metric_name)
-    plt.title(title)
-    plt.xticks(x, metrics['labels'], rotation=45)
-    plt.legend()
+def plot_latency_comparison(kafka_metrics, red_panda_metrics, title):
+    # Extracting Kafka metrics
+    kafka_producer_avg_latency = np.mean(list(kafka_metrics['producers'].values()))
+    kafka_consumer_avg_latency = np.mean([m['average_latency'] for m in kafka_metrics['consumers'].values()])
+    kafka_consumer_95th_latency = np.mean([m['95th_percentile_latency'] for m in kafka_metrics['consumers'].values()])
+    kafka_consumer_99th_latency = np.mean([m['99th_percentile_latency'] for m in kafka_metrics['consumers'].values()])
+
+    # Extracting Red Panda metrics
+    red_panda_producer_avg_latency = np.mean(list(red_panda_metrics['producers'].values()))
+    red_panda_consumer_avg_latency = np.mean([m['average_latency'] for m in red_panda_metrics['consumers'].values()])
+    red_panda_consumer_95th_latency = np.mean([m['95th_percentile_latency'] for m in red_panda_metrics['consumers'].values()])
+    red_panda_consumer_99th_latency = np.mean([m['99th_percentile_latency'] for m in red_panda_metrics['consumers'].values()])
+
+    # Labels
+    labels = ['Producer Avg Latency', 'Consumer Avg Latency', 'Consumer 95th Latency', 'Consumer 99th Latency']
+
+    # Kafka Metrics
+    kafka_metrics = [kafka_producer_avg_latency, kafka_consumer_avg_latency, kafka_consumer_95th_latency, kafka_consumer_99th_latency]
+
+    # Red Panda Metrics
+    red_panda_metrics = [red_panda_producer_avg_latency, red_panda_consumer_avg_latency, red_panda_consumer_95th_latency, red_panda_consumer_99th_latency]
+
+    x = np.arange(len(labels))  # the label locations
+    width = 0.35  # the width of the bars
+
+    fig, ax = plt.subplots()
+    rects1 = ax.bar(x - width/2, kafka_metrics, width, label='Kafka')
+    rects2 = ax.bar(x + width/2, red_panda_metrics, width, label='Red Panda')
+
+    # Add some text for labels, title and custom x-axis tick labels, etc.
+    ax.set_ylabel('Latency (seconds)')
+    ax.set_title(title)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.legend()
+
     plt.tight_layout()
     plt.show()
 
 
-# Running the tests
-num_producers_consumers_range = range(3,4)
-num_messages_range = [1, 10, 100]
+kafka_metrics = run_scalability_test(kafka_broker, topic, num_producers, num_consumers)
+red_panda_metrics = run_scalability_test(red_panda_broker, topic, num_producers, num_consumers)
 
-kafka_metrics = collect_metrics_for_comparison(kafka_broker, num_producers_consumers_range, num_messages_range)
-red_panda_metrics = collect_metrics_for_comparison(red_panda_broker, num_producers_consumers_range, num_messages_range)
-
-# Combine Kafka and Red Panda metrics for comparison
-combined_metrics = {
-    'kafka': kafka_metrics['producer_latency'],
-    'red_panda': red_panda_metrics['producer_latency'],
-    'labels': kafka_metrics['labels']
-}
-plot_comparison(combined_metrics, 'Latency (seconds)', 'Average Producer Latency Comparison')
-
-combined_metrics = {
-    'kafka': kafka_metrics['average_consumer_latency'],
-    'red_panda': red_panda_metrics['average_consumer_latency'],
-    'labels': kafka_metrics['labels']
-}
-plot_comparison(combined_metrics, 'Latency (seconds)', 'Average Consumer Latency Comparison')
-
-combined_metrics = {
-    'kafka': kafka_metrics['total_consumer_latency'],
-    'red_panda': red_panda_metrics['total_consumer_latency'],
-    'labels': kafka_metrics['labels']
-}
-plot_comparison(combined_metrics, 'Latency (seconds)', 'Total Consumer Latency Comparison')
-
+plot_latency_comparison(kafka_metrics, red_panda_metrics, 'Kafka vs Red Panda Latency Comparison')
 try:
     kafka_admin_client.delete_topics([topic])
     print(f"Topic {topic} deleted successfully.")
