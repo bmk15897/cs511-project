@@ -4,15 +4,11 @@ import matplotlib.pyplot as plt
 from kafka import KafkaProducer, KafkaConsumer, KafkaAdminClient
 import numpy as np
 
-
-
-# Example usage
 kafka_broker = 'localhost:9091'
-red_panda_broker = 'localhost:9092'
+red_panda_broker = 'localhost:19092'
 topic = 'scalability-test-1'
-num_producers = 5
-num_consumers = 5
-num_messages = 50000
+num_producers = 1
+num_consumers = 1
 
 kafka_admin_client = KafkaAdminClient(
     bootstrap_servers=kafka_broker,
@@ -24,14 +20,6 @@ red_panda_admin_client = KafkaAdminClient(
     client_id='test_client-red-panda'
 )
 
-
-import threading
-import time
-import matplotlib.pyplot as plt
-from kafka import KafkaProducer, KafkaConsumer, KafkaAdminClient
-import numpy as np
-
-# Constants
 MESSAGE_SIZE = 1024  # 1 KB per message
 TARGET_THROUGHPUT = 50 * 1024 * 1024  # 50 Mbps in bits
 DURATION = 60  # Duration of the test in seconds
@@ -52,7 +40,7 @@ def produce_messages(broker, topic, producer_id, metrics):
         end_time = time.time()
 
     producer.flush()
-    metrics['producers'][producer_id] = end_time - start_time
+    metrics['producers'][producer_id] = (end_time - start_time)/message_count
     producer.close()
 
 
@@ -138,10 +126,13 @@ def plot_latency_comparison(kafka_metrics, red_panda_metrics, title):
     plt.tight_layout()
     plt.show()
 
-
-kafka_metrics = run_scalability_test(kafka_broker, topic, num_producers, num_consumers)
 red_panda_metrics = run_scalability_test(red_panda_broker, topic, num_producers, num_consumers)
+kafka_metrics = run_scalability_test(kafka_broker, topic, num_producers, num_consumers)
 
+print(kafka_metrics)
+print()
+print(red_panda_metrics)
+print()
 plot_latency_comparison(kafka_metrics, red_panda_metrics, 'Kafka vs Red Panda Latency Comparison')
 try:
     kafka_admin_client.delete_topics([topic])
