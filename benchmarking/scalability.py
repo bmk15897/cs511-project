@@ -2,29 +2,46 @@ import threading
 import time
 import matplotlib.pyplot as plt
 from kafka import KafkaProducer, KafkaConsumer, KafkaAdminClient
+from kafka.admin import NewTopic
 import numpy as np
 
-kafka_broker = 'localhost:9091'
-red_panda_broker = 'localhost:9092'
+kafka_brokers = 'localhost:9092'
+red_panda_brokers = 'localhost:9091'
 topic = 'scalability-test-1'
 num_producers = 1
 num_consumers = 1
 MESSAGE_SIZE = 1024  # 1 KB per message
 TARGET_THROUGHPUT = 5 * 1024 * 1024  # 50 Mbps in bits
-DURATION = 1  # Duration of the test in seconds
+DURATION = 5  # Duration of the test in seconds
 
 kafka_admin_client = KafkaAdminClient(
-    bootstrap_servers=kafka_broker,
+    bootstrap_servers=kafka_brokers,
     client_id='test_client-kafka'
 )
 
 red_panda_admin_client = KafkaAdminClient(
-    bootstrap_servers=red_panda_broker,
+    bootstrap_servers=red_panda_brokers,
     client_id='test_client-red-panda'
 )
 
+try:
+    kafka_admin_client.delete_topics([topic])
+    print(f"Topic {topic} deleted successfully.")
+except Exception as e:
+    print(f"An error occurred: {e}")
+
+try:
+    red_panda_admin_client.delete_topics([topic])
+    print(f"Topic {topic} deleted successfully.")
+except Exception as e:
+    print(f"An error occurred: {e}")
+time.sleep(3)
+topic_list = [NewTopic(name=topic, num_partitions=1, replication_factor=1)]
+kafka_admin_client.create_topics(new_topics=topic_list, validate_only=False)
+red_panda_admin_client.create_topics(new_topics=topic_list, validate_only=False)
+
 def produce_messages(broker, topic, producer_id, metrics):
-    producer = KafkaProducer(bootstrap_servers=[broker])
+    producer = KafkaProducer(bootstrap_servers=broker)
     message = 'x' * MESSAGE_SIZE
     end_time = start_time = time.time()
     message_count = 0
@@ -119,18 +136,20 @@ def plot_latency_comparison(kafka_metrics, red_panda_metrics, title):
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.legend()
+    ax.set_ylim(0, 1.0)
+    ax.set_yticks(np.arange(0, 1.0, 0.1))
 
     plt.tight_layout()
     plt.show()
 
 print(time.time())
-red_panda_metrics = run_scalability_test(red_panda_broker, topic, num_producers, num_consumers)
+red_panda_metrics = run_scalability_test(red_panda_brokers, topic, num_producers, num_consumers)
 print(time.time())
-kafka_metrics = run_scalability_test(kafka_broker, topic, num_producers, num_consumers)
+kafka_metrics = run_scalability_test(kafka_brokers, topic, num_producers, num_consumers)
 print(time.time())
-print(kafka_metrics)
-print()
 print(red_panda_metrics)
+print()
+print(kafka_metrics)
 print()
 plot_latency_comparison(kafka_metrics, red_panda_metrics, f"Kafka vs Red Panda Latency Comparison for {num_producers} P and {num_consumers} C")
 try:
